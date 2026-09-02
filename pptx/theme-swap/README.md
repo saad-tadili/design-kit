@@ -1,41 +1,65 @@
 # theme-swap
 
-Converts a `.pptx` between two colour and font themes. The mapping is
-one-to-one in both directions, so the conversion is lossless and can be run any
-number of times: converting to A and back to B reproduces the original file
-byte for byte.
+Converts a `.pptx` between two colour and font themes. Theme A uses the values
+on the left side of the mappings in `theme_swap.py`; Theme B uses the values on
+the right.
+
+The mappings are one-to-one and reversible. Converting from one theme to the
+other and back restores the original uncompressed PowerPoint package contents.
+The `.pptx` file itself may not be byte-identical because its ZIP container is
+recompressed.
 
 ## Usage
 
-```
-python theme_swap.py in.pptx out.pptx --to a
+```text
 python theme_swap.py in.pptx out.pptx --to b
+python theme_swap.py out.pptx restored.pptx --to a
 ```
 
-Python 3.6 or later. Standard library only, nothing to install.
+Use different input and output paths. The script rejects in-place conversion
+and writes through a temporary file so a failed conversion cannot damage an
+existing presentation.
+
+Python 3.11 or later. Standard library only, nothing to install.
 
 ## What it changes
 
-Panel fills, accent colours, text colours and font names, across slides,
-layouts, masters, theme and document properties. Layout, text and geometry are
-untouched.
+The script converts configured colours and exact font names in:
 
-Code blocks are out of scope by design: the dark panel background and the syntax
-colours inside it are the same in both themes, so code always reads the same
-way. `F1F7F7` is also left alone, because a deck may use that one value both as
-a pale panel fill and as code body text.
+- slides, layouts and masters;
+- presentation themes and table styles;
+- chart and SmartArt XML;
+- notes and handout masters;
+- document properties.
+
+Layout, text, geometry and embedded images are unchanged. Code colours remain
+unchanged unless they are explicitly added to the mapping.
+
+After conversion, the script validates the PowerPoint package and reports how
+many XML parts, colour references and font references changed.
 
 ## Configuring
 
-Edit `COLOURS` and `FONTS` at the top of the script. Fonts are matched on their
-exact name as PowerPoint stores it, so both sides must be spelled precisely —
-a near-miss silently changes nothing.
+Edit `COLOURS` and `FONTS` at the top of the script. Each `COLOURS` entry maps a
+Theme A value to its Theme B equivalent. Each `FONTS` entry follows the same
+direction. `--to b` applies the mappings as written; `--to a` reverses them.
 
-Both sides of every row must stay unique. If a value appeared as both a source
-and a target the swap would no longer be reversible; the script asserts this on
-every run.
+Font names are matched exactly as PowerPoint stores them. Both names must be
+spelled precisely; a near-match is deliberately left unchanged.
+
+Every source and target value must remain unique, and the two sides must remain
+disjoint. The script validates these constraints on every run. Shared neutral
+colours such as white and black belong in `UNCHANGED_COLOURS`, not in the
+reversible mapping.
+
+An input containing mapped values from both themes is rejected because merging
+the two sides would not be reversible. Normalize the presentation to one theme
+before converting it.
 
 ## Notes
 
 The theme carries font names only. Rendering a theme as intended still requires
-those fonts installed on the machine.
+those fonts to be installed on the machine.
+
+Embedded images are copied unchanged. If an image must differ between themes,
+provide and replace it separately.
