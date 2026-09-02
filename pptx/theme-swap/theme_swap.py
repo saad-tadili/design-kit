@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Swap a .pptx between theme A and theme B.
+"""Swap a .pptx between the Acme and Violet themes.
 
-    python theme_swap.py in.pptx out.pptx --to a
-    python theme_swap.py in.pptx out.pptx --to b
+    python theme_swap.py in.pptx out.pptx --to violet
+    python theme_swap.py in.pptx out.pptx --to acme
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import tempfile
 import zipfile
 
 
-# Theme A -> Theme B. Both sides must remain unique and disjoint so the
+# Acme -> Violet. Both sides must remain unique and disjoint so the
 # conversion can be reversed without losing the original package contents.
 COLOURS = {
     "003946": "241733",
@@ -85,20 +85,20 @@ def validate_mapping() -> None:
     font_targets = set(FONTS.values())
 
     if len(colour_targets) != len(COLOURS):
-        raise ValueError("Theme B colour values must be unique")
+        raise ValueError("Violet colour values must be unique")
     if colour_sources & colour_targets:
-        raise ValueError("Theme A and Theme B colour values must be disjoint")
+        raise ValueError("Acme and Violet colour values must be disjoint")
     if UNCHANGED_COLOURS & (colour_sources | colour_targets):
         raise ValueError("Unchanged colours must not appear in the mapping")
     if len(font_targets) != len(FONTS):
-        raise ValueError("Theme B font values must be unique")
+        raise ValueError("Violet font values must be unique")
     if font_sources & font_targets:
-        raise ValueError("Theme A and Theme B font values must be disjoint")
+        raise ValueError("Acme and Violet font values must be disjoint")
 
 
 def build(target: str) -> tuple[dict[str, str], dict[str, str]]:
     """Return the colour and font mappings required for the target theme."""
-    if target == "b":
+    if target == "violet":
         return dict(COLOURS), dict(FONTS)
     return (
         {value: key for key, value in COLOURS.items()},
@@ -113,13 +113,13 @@ def is_convertible_part(name: str) -> bool:
 
 
 def theme_inventory(path: Path) -> tuple[int, int]:
-    """Count mapped Theme A and Theme B values in a package."""
-    theme_a_colours = set(COLOURS)
-    theme_b_colours = set(COLOURS.values())
-    theme_a_fonts = set(FONTS)
-    theme_b_fonts = set(FONTS.values())
-    theme_a_count = 0
-    theme_b_count = 0
+    """Count mapped Acme and Violet values in a package."""
+    acme_colours = set(COLOURS)
+    violet_colours = set(COLOURS.values())
+    acme_fonts = set(FONTS)
+    violet_fonts = set(FONTS.values())
+    acme_count = 0
+    violet_count = 0
 
     with zipfile.ZipFile(path) as package:
         for name in package.namelist():
@@ -128,25 +128,25 @@ def theme_inventory(path: Path) -> tuple[int, int]:
             text = package.read(name).decode("utf-8")
             for colour in SRGB_RE.findall(text):
                 value = colour[1].upper()
-                theme_a_count += value in theme_a_colours
-                theme_b_count += value in theme_b_colours
+                acme_count += value in acme_colours
+                violet_count += value in violet_colours
             for font in TYPEFACE_RE.findall(text):
-                theme_a_count += font in theme_a_fonts
-                theme_b_count += font in theme_b_fonts
-            for font in theme_a_fonts:
-                theme_a_count += text.count(f"<vt:lpstr>{font}</vt:lpstr>")
-            for font in theme_b_fonts:
-                theme_b_count += text.count(f"<vt:lpstr>{font}</vt:lpstr>")
+                acme_count += font in acme_fonts
+                violet_count += font in violet_fonts
+            for font in acme_fonts:
+                acme_count += text.count(f"<vt:lpstr>{font}</vt:lpstr>")
+            for font in violet_fonts:
+                violet_count += text.count(f"<vt:lpstr>{font}</vt:lpstr>")
 
-    return theme_a_count, theme_b_count
+    return acme_count, violet_count
 
 
 def validate_theme_state(path: Path) -> None:
     """Reject mixed inputs because collapsing both sides is not reversible."""
-    theme_a_count, theme_b_count = theme_inventory(path)
-    if theme_a_count and theme_b_count:
+    acme_count, violet_count = theme_inventory(path)
+    if acme_count and violet_count:
         raise ValueError(
-            "Input contains mapped values from both Theme A and Theme B; "
+            "Input contains mapped values from both Acme and Violet; "
             "conversion would not be reversible"
         )
 
@@ -263,14 +263,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", help="Source .pptx file")
     parser.add_argument("output", help="Destination .pptx file")
-    parser.add_argument("--to", choices=("a", "b"), required=True)
+    parser.add_argument("--to", choices=("acme", "violet"), required=True)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     output, parts, colours, fonts = swap(args.input, args.output, args.to)
-    print(f"Theme {args.to.upper()} conversion complete")
+    print(f"{args.to.title()} theme conversion complete")
     print(f"XML parts changed: {parts}")
     print(f"Colour references changed: {colours}")
     print(f"Font references changed: {fonts}")
