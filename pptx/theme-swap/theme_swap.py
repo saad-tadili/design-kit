@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Swap a .pptx between the Acme and Violet themes.
+"""Swap a .pptx or .xlsx between the Acme and Violet themes.
 
     python theme_swap.py in.pptx out.pptx --to violet
-    python theme_swap.py in.pptx out.pptx --to acme
+    python theme_swap.py in.xlsx out.xlsx --to acme
+
+The file type is detected from the input extension. PowerPoint packages get
+colour and font swaps; Excel packages get colour swaps only, since workbook
+fonts are not theme fonts and must not change.
 """
 
 from __future__ import annotations
@@ -53,28 +57,70 @@ COLOURS = {
 # unchanged. Keeping them outside COLOURS preserves the disjoint mapping rule.
 UNCHANGED_COLOURS = frozenset({"000000", "FFFFFF"})
 
+# Both brand font families are Acme-side sources: decks built with the real
+# names and decks built with the DLP-safe placeholder names both convert.
+# Each source keeps its own distinct Violet target so the reverse conversion
+# restores exactly the name the deck started with.
 FONTS = {
-    "Acme New Display": "Franklin Gothic Medium",
-    "Acme New Text": "Franklin Gothic Book",
+    "Sun Life New Display": "Franklin Gothic Medium",
+    "Sun Life New Text": "Franklin Gothic Book",
 }
 
-PART_PREFIXES = (
-    "docProps/",
-    "ppt/charts/",
-    "ppt/diagrams/",
-    "ppt/handoutMasters/",
-    "ppt/notesMasters/",
-    "ppt/notesSlides/",
-    "ppt/slideLayouts/",
-    "ppt/slideMasters/",
-    "ppt/slides/",
-    "ppt/theme/",
-)
-PART_FILES = frozenset({"ppt/tableStyles.xml"})
-REQUIRED_PARTS = frozenset({"[Content_Types].xml", "ppt/presentation.xml"})
+# Package profiles. Which parts are converted, which parts must exist, and
+# whether fonts are swapped all depend on the package format.
+FORMATS = {
+    ".pptx": {
+        "label": "PowerPoint",
+        "part_prefixes": (
+            "docProps/",
+            "ppt/charts/",
+            "ppt/diagrams/",
+            "ppt/handoutMasters/",
+            "ppt/notesMasters/",
+            "ppt/notesSlides/",
+            "ppt/slideLayouts/",
+            "ppt/slideMasters/",
+            "ppt/slides/",
+            "ppt/theme/",
+        ),
+        "part_files": frozenset({"ppt/tableStyles.xml"}),
+        "required_parts": frozenset({"[Content_Types].xml", "ppt/presentation.xml"}),
+        "swap_fonts": True,
+    },
+    ".xlsx": {
+        "label": "Excel",
+        "part_prefixes": (
+            "docProps/",
+            "xl/charts/",
+            "xl/chartsheets/",
+            "xl/drawings/",
+            "xl/tables/",
+            "xl/theme/",
+            "xl/worksheets/",
+        ),
+        "part_files": frozenset({"xl/styles.xml", "xl/sharedStrings.xml"}),
+        "required_parts": frozenset({"[Content_Types].xml", "xl/workbook.xml"}),
+        "swap_fonts": False,
+    },
+}
 
+# DrawingML colours (slides, themes, charts, drawings): srgbClr val="RRGGBB".
 SRGB_RE = re.compile(r'(srgbClr\s+)val="([0-9A-Fa-f]{6})"')
+# SpreadsheetML colours (styles, fills, borders, tab colours, conditional
+# formats, rich text runs): rgb="AARRGGBB". The alpha byte is preserved.
+ARGB_RE = re.compile(r'(rgb=")([0-9A-Fa-f]{2})([0-9A-Fa-f]{6})(")')
 TYPEFACE_RE = re.compile(r'typeface="([^"]*)"')
+
+
+def detect_format(path: Path) -> dict:
+    profile = FORMATS.get(path.suffix.lower())
+    if profile is None:
+        supported = ", ".join(sorted(FORMATS))
+        raise ValueError(
+            f"Unsupported file type '{path.suffix}' for {path.name}; "
+            f"supported: {supported}"
+        )
+    return profile
 
 
 def validate_mapping() -> None:
@@ -96,38 +142,45 @@ def validate_mapping() -> None:
         raise ValueError("Acme and Violet font values must be disjoint")
 
 
-def build(target: str) -> tuple[dict[str, str], dict[str, str]]:
+def build(target: str, swap_fonts: bool) -> tuple[dict[str, str], dict[str, str]]:
     """Return the colour and font mappings required for the target theme."""
     if target == "violet":
-        return dict(COLOURS), dict(FONTS)
-    return (
-        {value: key for key, value in COLOURS.items()},
-        {value: key for key, value in FONTS.items()},
-    )
+        colour_map = dict(COLOURS)
+        font_map = dict(FONTS)
+    else:
+        colour_map = {value: key for key, value in COLOURS.items()}
+        font_map = {value: key for key, value in FONTS.items()}
+    if not swap_fonts:
+        font_map = {}
+    return colour_map, font_map
 
 
-def is_convertible_part(name: str) -> bool:
+def is_convertible_part(name: str, profile: dict) -> bool:
     return name.endswith(".xml") and (
-        name in PART_FILES or name.startswith(PART_PREFIXES)
+        name in profile["part_files"] or name.startswith(profile["part_prefixes"])
     )
 
 
-def theme_inventory(path: Path) -> tuple[int, int]:
+def theme_inventory(path: Path, profile: dict) -> tuple[int, int]:
     """Count mapped Acme and Violet values in a package."""
     acme_colours = set(COLOURS)
     violet_colours = set(COLOURS.values())
-    acme_fonts = set(FONTS)
-    violet_fonts = set(FONTS.values())
+    acme_fonts = set(FONTS) if profile["swap_fonts"] else set()
+    violet_fonts = set(FONTS.values()) if profile["swap_fonts"] else set()
     acme_count = 0
     violet_count = 0
 
     with zipfile.ZipFile(path) as package:
         for name in package.namelist():
-            if not is_convertible_part(name):
+            if not is_convertible_part(name, profile):
                 continue
             text = package.read(name).decode("utf-8")
             for colour in SRGB_RE.findall(text):
                 value = colour[1].upper()
+                acme_count += value in acme_colours
+                violet_count += value in violet_colours
+            for colour in ARGB_RE.findall(text):
+                value = colour[2].upper()
                 acme_count += value in acme_colours
                 violet_count += value in violet_colours
             for font in TYPEFACE_RE.findall(text):
@@ -141,9 +194,9 @@ def theme_inventory(path: Path) -> tuple[int, int]:
     return acme_count, violet_count
 
 
-def validate_theme_state(path: Path) -> None:
+def validate_theme_state(path: Path, profile: dict) -> None:
     """Reject mixed inputs because collapsing both sides is not reversible."""
-    acme_count, violet_count = theme_inventory(path)
+    acme_count, violet_count = theme_inventory(path, profile)
     if acme_count and violet_count:
         raise ValueError(
             "Input contains mapped values from both Acme and Violet; "
@@ -158,50 +211,58 @@ def convert(
     colour_changes = 0
     font_changes = 0
 
-    def replace_colour(match: re.Match[str]) -> str:
+    def replace_srgb(match: re.Match[str]) -> str:
         nonlocal colour_changes
-        original = match.group(2)
-        replacement = colour_map.get(original.upper())
+        replacement = colour_map.get(match.group(2).upper())
         if replacement is None:
             return match.group(0)
         colour_changes += 1
         return f'{match.group(1)}val="{replacement}"'
 
+    def replace_argb(match: re.Match[str]) -> str:
+        nonlocal colour_changes
+        replacement = colour_map.get(match.group(3).upper())
+        if replacement is None:
+            return match.group(0)
+        colour_changes += 1
+        return f"{match.group(1)}{match.group(2)}{replacement}{match.group(4)}"
+
     def replace_typeface(match: re.Match[str]) -> str:
         nonlocal font_changes
-        original = match.group(1)
-        replacement = font_map.get(original)
+        replacement = font_map.get(match.group(1))
         if replacement is None:
             return match.group(0)
         font_changes += 1
         return f'typeface="{replacement}"'
 
-    text = SRGB_RE.sub(replace_colour, text)
-    text = TYPEFACE_RE.sub(replace_typeface, text)
-
-    for original, replacement in font_map.items():
-        source = f"<vt:lpstr>{original}</vt:lpstr>"
-        occurrences = text.count(source)
-        if occurrences:
-            text = text.replace(
-                source, f"<vt:lpstr>{replacement}</vt:lpstr>"
-            )
-            font_changes += occurrences
+    text = SRGB_RE.sub(replace_srgb, text)
+    text = ARGB_RE.sub(replace_argb, text)
+    if font_map:
+        text = TYPEFACE_RE.sub(replace_typeface, text)
+        for original, replacement in font_map.items():
+            source = f"<vt:lpstr>{original}</vt:lpstr>"
+            occurrences = text.count(source)
+            if occurrences:
+                text = text.replace(
+                    source, f"<vt:lpstr>{replacement}</vt:lpstr>"
+                )
+                font_changes += occurrences
 
     return text, colour_changes, font_changes
 
 
-def validate_package(path: Path) -> None:
-    """Confirm the result is a readable PowerPoint package."""
+def validate_package(path: Path, profile: dict) -> None:
+    """Confirm the result is a readable Office package of the expected type."""
     if not zipfile.is_zipfile(path):
-        raise ValueError(f"Not a valid .pptx package: {path}")
+        raise ValueError(f"Not a valid {profile['label']} package: {path}")
 
     with zipfile.ZipFile(path) as package:
         names = set(package.namelist())
-        missing = REQUIRED_PARTS - names
+        missing = profile["required_parts"] - names
         if missing:
             raise ValueError(
-                "PowerPoint package is missing: " + ", ".join(sorted(missing))
+                f"{profile['label']} package is missing: "
+                + ", ".join(sorted(missing))
             )
         corrupt_part = package.testzip()
         if corrupt_part is not None:
@@ -218,10 +279,17 @@ def swap(src: str | Path, dst: str | Path, target: str) -> tuple[Path, int, int,
     if not source.is_file():
         raise FileNotFoundError(source)
 
+    profile = detect_format(source)
+    if destination.suffix.lower() != source.suffix.lower():
+        raise ValueError(
+            "Input and output must have the same extension: "
+            f"{source.suffix} vs {destination.suffix}"
+        )
+
     validate_mapping()
-    validate_package(source)
-    validate_theme_state(source)
-    colour_map, font_map = build(target)
+    validate_package(source, profile)
+    validate_theme_state(source, profile)
+    colour_map, font_map = build(target, profile["swap_fonts"])
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -240,7 +308,7 @@ def swap(src: str | Path, dst: str | Path, target: str) -> tuple[Path, int, int,
         ) as output_package:
             for item in input_package.infolist():
                 data = input_package.read(item.filename)
-                if is_convertible_part(item.filename):
+                if is_convertible_part(item.filename, profile):
                     text, colours, fonts = convert(
                         data.decode("utf-8"), colour_map, font_map
                     )
@@ -251,7 +319,7 @@ def swap(src: str | Path, dst: str | Path, target: str) -> tuple[Path, int, int,
                         font_changes += fonts
                 output_package.writestr(item, data)
 
-        validate_package(temporary)
+        validate_package(temporary, profile)
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
@@ -261,8 +329,8 @@ def swap(src: str | Path, dst: str | Path, target: str) -> tuple[Path, int, int,
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", help="Source .pptx file")
-    parser.add_argument("output", help="Destination .pptx file")
+    parser.add_argument("input", help="Source .pptx or .xlsx file")
+    parser.add_argument("output", help="Destination file, same extension as input")
     parser.add_argument("--to", choices=("acme", "violet"), required=True)
     return parser.parse_args()
 
