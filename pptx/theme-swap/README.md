@@ -64,32 +64,3 @@ those fonts to be installed on the machine.
 Embedded images are copied unchanged. If an image must differ between themes,
 provide and replace it separately.
 
-Hi all,
-
-Following the BG feedback on our AI-Ready Data Assessment, we would like to bring more business context to the findings and connect them to Asia’s priorities and intended AI use.
-
-The material shared outlines five AI transformation pillars:
-
-* Advisor enablement
-* Interactive client portal
-* Client Contact Centre
-* Digital Onboarding and Policy Issuance
-* Claims automation
-
-To make that connection, could you please identify **up to two priority AI initiatives within each pillar most critical to Asia’s near-term business commitments**? Please focus on specific business use cases planned or underway, indicating the relevant market or entity. There is no need to cover every pillar or provide a full portfolio inventory.
-
-For each selected initiative, please share any existing material describing:
-
-* **Business purpose and function:** intended users, the problem addressed and expected outcome.
-* **What AI does:** what it receives, produces, recommends or executes, including where human review or approval occurs.
-* **Main data and content needed:** key datasets, documents and source systems or repositories.
-* **Delivery stage and timing:** current stage, next milestone and planned deployment scope.
-
-This will help us identify the relevant questionnaire capabilities and the stakes of each intended AI use, so we can explain what the assessment findings mean for Asia’s priorities.
-
-**There is no required format.** Existing presentations, initiative summaries, business cases, links or brief answers are welcome. Please share what already exists rather than creating or reformatting material.
-
-**Requested by: Friday, October 2 (EOD)** to support completion of the assessment and preparation of enterprise-level findings.
-
-Thank you for your support.
-
