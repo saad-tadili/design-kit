@@ -52,18 +52,6 @@ disjoint. The script validates these constraints on every run. Shared neutral
 colours such as white and black belong in `UNCHANGED_COLOURS`, not in the
 reversible mapping.
 
-we’re gathering a little more context on priority AI initiatives to help connect the questionnaire findings to the work each is delivering.
-From the, we identified:
-Could you confirm whether these are the right initiatives to focus on?
-We have a short description of each, but would appreciate any existing material covering the business objective, what AI does, the main data and documents it uses, and the current stage or target timing.
-The main point we need to clarify is how the output is used: does AI prepare information or flag issues for someone to review, make recommendations that influence a decision, or take action? Understanding where human review or approval happens will help us identify the relevant data capabilities and AI stakes.
-If is a near-term priority, please also suggest one or two specific AI use cases within it.
-No need to create a new document or reformat anything. Existing slides, summaries, links or a few lines by email are all welcome.
-Could you please share what is available by to support the assessment and enterprise-level findings?
-Thanks for your help,
-Saad
-
-
 An input containing mapped values from both themes is rejected because merging
 the two sides would not be reversible. Normalize the presentation to one theme
 before converting it.
