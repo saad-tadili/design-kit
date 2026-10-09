@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Swap a .pptx or .xlsx between the Acme and Violet themes.
+"""Swap a .pptx, .docx or .xlsx between the Acme and Violet themes.
 
     python theme_swap.py in.pptx out.pptx --to violet
+    python theme_swap.py in.docx out.docx --to violet
     python theme_swap.py in.xlsx out.xlsx --to acme
 
-The file type is detected from the input extension. PowerPoint packages get
-colour and font swaps; Excel packages get colour swaps only, since workbook
-fonts are not theme fonts and must not change.
+The file type is detected from the input extension. PowerPoint and Word
+packages get colour, font and vocabulary swaps; Excel packages get colour and
+vocabulary swaps only, since workbook fonts are not theme fonts and must not
+change.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from xml.sax.saxutils import escape
 import zipfile
 
 
@@ -57,13 +60,53 @@ COLOURS = {
 # unchanged. Keeping them outside COLOURS preserves the disjoint mapping rule.
 UNCHANGED_COLOURS = frozenset({"000000", "FFFFFF"})
 
-# Both brand font families are Acme-side sources: decks built with the real
-# names and decks built with the DLP-safe placeholder names both convert.
-# Each source keeps its own distinct Violet target so the reverse conversion
-# restores exactly the name the deck started with.
+# Acme font families, grouped by where they are used. Each source keeps its
+# own distinct Violet target so the reverse conversion restores exactly the
+# name the file started with.
 FONTS = {
+    # Slides
     "Sun Life New Display": "Franklin Gothic Medium",
     "Sun Life New Text": "Franklin Gothic Book",
+    # Documents
+    "Sun Life Serif": "Georgia",
+    "Sun Life Sans": "Segoe UI",
+}
+
+# Organization vocabulary, Acme -> Violet. Violet values are bracketed
+# placeholders such as "[company]", one per term, so the swap stays one-to-one.
+# The rules match COLOURS: each side unique, the two sides disjoint, and no
+# entry contained in an entry from the other side. Matching is exact,
+# case-sensitive and on whole words, longest entry first, so "Acme Holdings"
+# is matched before "Acme". Only text content changes; tags, attributes and
+# style names are never touched.
+#
+# To extend, add one entry per spelling that must change, including plurals,
+# abbreviations and domain names, and give each its own placeholder. Text that
+# Word or PowerPoint has split across several runs is only matched if the
+# whole term sits in a single run.
+TERMS = {
+    # Organization
+    "Sun Life": "[organization]",
+    "sunlife.ca": "[organization_domain]",
+    "SLF": "[organization_abbreviation]",
+    "SLC": "[business_group_1]",
+    # Governance bodies and internal programmes
+    "ETAB": "[architecture_board]",
+    "DBTS": "[leadership_team]",
+    "ATG": "[data_product]",
+    # People
+    "Saad Tadili": "[first_name_last_name]",
+    # Platforms and vendors
+    "ServiceNow": "[itsm_platform]",
+    "Ardoq": "[architecture_tool]",
+    "Snowflake Horizon": "[data_platform_governance]",
+    "Snowflake": "[data_platform]",
+    "AWS S3": "[object_storage]",
+    "AWS": "[cloud_provider]",
+    "Collibra": "[data_catalog]",
+    "Tableau": "[bi_tool]",
+    # Regulators
+    "OSFI": "[regulator]",
 }
 
 # Package profiles. Which parts are converted, which parts must exist, and
@@ -85,6 +128,27 @@ FORMATS = {
         ),
         "part_files": frozenset({"ppt/tableStyles.xml"}),
         "required_parts": frozenset({"[Content_Types].xml", "ppt/presentation.xml"}),
+        "swap_fonts": True,
+    },
+    ".docx": {
+        "label": "Word",
+        "part_prefixes": (
+            "docProps/",
+            "word/charts/",
+            "word/comments",
+            "word/diagrams/",
+            "word/document",
+            "word/endnotes",
+            "word/fontTable",
+            "word/footer",
+            "word/footnotes",
+            "word/header",
+            "word/numbering",
+            "word/styles",
+            "word/theme/",
+        ),
+        "part_files": frozenset(),
+        "required_parts": frozenset({"[Content_Types].xml", "word/document.xml"}),
         "swap_fonts": True,
     },
     ".xlsx": {
@@ -110,6 +174,29 @@ SRGB_RE = re.compile(r'(srgbClr\s+)val="([0-9A-Fa-f]{6})"')
 # formats, rich text runs): rgb="AARRGGBB". The alpha byte is preserved.
 ARGB_RE = re.compile(r'(rgb=")([0-9A-Fa-f]{2})([0-9A-Fa-f]{6})(")')
 TYPEFACE_RE = re.compile(r'typeface="([^"]*)"')
+# WordprocessingML colours: <w:color w:val="RRGGBB"/> for text, and the fill
+# and color attributes used by shading and borders.
+WORD_COLOR_RE = re.compile(r'(<w:color\b[^>]*?\bw:val=")([0-9A-Fa-f]{6})(")')
+WORD_ATTR_RE = re.compile(r'(\bw:(?:fill|color)=")([0-9A-Fa-f]{6})(")')
+# WordprocessingML fonts: run fonts and the font table.
+WORD_FONT_RE = re.compile(r'(\bw:(?:ascii|hAnsi|cs|eastAsia|name)=")([^"]*)(")')
+# Text content between tags. Vocabulary swaps are confined to these spans.
+TEXT_RE = re.compile(r">([^<]+)<")
+
+
+def term_pattern(terms: list[str]) -> re.Pattern[str] | None:
+    """Match any of the given terms as whole words, longest first."""
+    if not terms:
+        return None
+    ordered = sorted(terms, key=len, reverse=True)
+    alternatives = "|".join(re.escape(escape(term)) for term in ordered)
+    return re.compile(rf"(?<![0-9A-Za-z])(?:{alternatives})(?![0-9A-Za-z])")
+
+
+def count_terms(text: str, pattern: re.Pattern[str] | None) -> int:
+    if pattern is None:
+        return 0
+    return sum(len(pattern.findall(span)) for span in TEXT_RE.findall(text))
 
 
 def detect_format(path: Path) -> dict:
@@ -141,18 +228,38 @@ def validate_mapping() -> None:
     if font_sources & font_targets:
         raise ValueError("Acme and Violet font values must be disjoint")
 
+    term_sources = set(TERMS)
+    term_targets = set(TERMS.values())
+    if "" in term_sources | term_targets:
+        raise ValueError("Vocabulary entries must not be empty")
+    if len(term_targets) != len(TERMS):
+        raise ValueError("Violet vocabulary values must be unique")
+    for source in term_sources:
+        for target in term_targets:
+            if source in target or target in source:
+                raise ValueError(
+                    f"Acme and Violet vocabulary must be disjoint: "
+                    f"'{source}' overlaps '{target}'"
+                )
 
-def build(target: str, swap_fonts: bool) -> tuple[dict[str, str], dict[str, str]]:
-    """Return the colour and font mappings required for the target theme."""
+
+def build(
+    target: str, swap_fonts: bool
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """Return the colour, font and vocabulary mappings for the target theme."""
     if target == "violet":
         colour_map = dict(COLOURS)
         font_map = dict(FONTS)
+        term_map = dict(TERMS)
     else:
         colour_map = {value: key for key, value in COLOURS.items()}
         font_map = {value: key for key, value in FONTS.items()}
+        term_map = {value: key for key, value in TERMS.items()}
     if not swap_fonts:
         font_map = {}
-    return colour_map, font_map
+    # Terms are matched against XML text, so compare in escaped form.
+    term_map = {escape(key): escape(value) for key, value in term_map.items()}
+    return colour_map, font_map, term_map
 
 
 def is_convertible_part(name: str, profile: dict) -> bool:
@@ -167,6 +274,8 @@ def theme_inventory(path: Path, profile: dict) -> tuple[int, int]:
     violet_colours = set(COLOURS.values())
     acme_fonts = set(FONTS) if profile["swap_fonts"] else set()
     violet_fonts = set(FONTS.values()) if profile["swap_fonts"] else set()
+    acme_terms = term_pattern(list(TERMS))
+    violet_terms = term_pattern(list(TERMS.values()))
     acme_count = 0
     violet_count = 0
 
@@ -183,13 +292,27 @@ def theme_inventory(path: Path, profile: dict) -> tuple[int, int]:
                 value = colour[2].upper()
                 acme_count += value in acme_colours
                 violet_count += value in violet_colours
+            for regex in (WORD_COLOR_RE, WORD_ATTR_RE):
+                for colour in regex.findall(text):
+                    value = colour[1].upper()
+                    acme_count += value in acme_colours
+                    violet_count += value in violet_colours
             for font in TYPEFACE_RE.findall(text):
                 acme_count += font in acme_fonts
                 violet_count += font in violet_fonts
+            for font in WORD_FONT_RE.findall(text):
+                acme_count += font[1] in acme_fonts
+                violet_count += font[1] in violet_fonts
             for font in acme_fonts:
                 acme_count += text.count(f"<vt:lpstr>{font}</vt:lpstr>")
             for font in violet_fonts:
                 violet_count += text.count(f"<vt:lpstr>{font}</vt:lpstr>")
+            # Font names listed in document properties also appear as text,
+            # so vocabulary is counted only after those entries are removed.
+            for font in acme_fonts | violet_fonts:
+                text = text.replace(f"<vt:lpstr>{font}</vt:lpstr>", "")
+            acme_count += count_terms(text, acme_terms)
+            violet_count += count_terms(text, violet_terms)
 
     return acme_count, violet_count
 
@@ -205,11 +328,15 @@ def validate_theme_state(path: Path, profile: dict) -> None:
 
 
 def convert(
-    text: str, colour_map: dict[str, str], font_map: dict[str, str]
-) -> tuple[str, int, int]:
+    text: str,
+    colour_map: dict[str, str],
+    font_map: dict[str, str],
+    term_map: dict[str, str],
+) -> tuple[str, int, int, int]:
     """Convert theme values in one XML part and return replacement counts."""
     colour_changes = 0
     font_changes = 0
+    term_changes = 0
 
     def replace_srgb(match: re.Match[str]) -> str:
         nonlocal colour_changes
@@ -227,6 +354,14 @@ def convert(
         colour_changes += 1
         return f"{match.group(1)}{match.group(2)}{replacement}{match.group(4)}"
 
+    def replace_word_colour(match: re.Match[str]) -> str:
+        nonlocal colour_changes
+        replacement = colour_map.get(match.group(2).upper())
+        if replacement is None:
+            return match.group(0)
+        colour_changes += 1
+        return f"{match.group(1)}{replacement}{match.group(3)}"
+
     def replace_typeface(match: re.Match[str]) -> str:
         nonlocal font_changes
         replacement = font_map.get(match.group(1))
@@ -235,10 +370,21 @@ def convert(
         font_changes += 1
         return f'typeface="{replacement}"'
 
+    def replace_word_font(match: re.Match[str]) -> str:
+        nonlocal font_changes
+        replacement = font_map.get(match.group(2))
+        if replacement is None:
+            return match.group(0)
+        font_changes += 1
+        return f"{match.group(1)}{replacement}{match.group(3)}"
+
     text = SRGB_RE.sub(replace_srgb, text)
     text = ARGB_RE.sub(replace_argb, text)
+    text = WORD_COLOR_RE.sub(replace_word_colour, text)
+    text = WORD_ATTR_RE.sub(replace_word_colour, text)
     if font_map:
         text = TYPEFACE_RE.sub(replace_typeface, text)
+        text = WORD_FONT_RE.sub(replace_word_font, text)
         for original, replacement in font_map.items():
             source = f"<vt:lpstr>{original}</vt:lpstr>"
             occurrences = text.count(source)
@@ -248,7 +394,29 @@ def convert(
                 )
                 font_changes += occurrences
 
-    return text, colour_changes, font_changes
+    # Vocabulary runs last, after font names in document properties have been
+    # swapped, so a font name is never rewritten as ordinary text.
+    if term_map:
+        # term_map keys are already escaped, so they are compiled directly
+        # rather than through term_pattern, which escapes its input.
+        ordered = sorted(term_map, key=len, reverse=True)
+        pattern = re.compile(
+            r"(?<![0-9A-Za-z])(?:"
+            + "|".join(re.escape(key) for key in ordered)
+            + r")(?![0-9A-Za-z])"
+        )
+
+        def replace_term(match: re.Match[str]) -> str:
+            nonlocal term_changes
+            term_changes += 1
+            return term_map[match.group(0)]
+
+        def replace_span(match: re.Match[str]) -> str:
+            return f">{pattern.sub(replace_term, match.group(1))}<"
+
+        text = TEXT_RE.sub(replace_span, text)
+
+    return text, colour_changes, font_changes, term_changes
 
 
 def validate_package(path: Path, profile: dict) -> None:
@@ -269,7 +437,9 @@ def validate_package(path: Path, profile: dict) -> None:
             raise ValueError(f"Corrupt package part: {corrupt_part}")
 
 
-def swap(src: str | Path, dst: str | Path, target: str) -> tuple[Path, int, int, int]:
+def swap(
+    src: str | Path, dst: str | Path, target: str
+) -> tuple[Path, int, int, int, int]:
     """Write a validated conversion without risking either input or output."""
     source = Path(src).expanduser().resolve()
     destination = Path(dst).expanduser().resolve()
@@ -289,7 +459,7 @@ def swap(src: str | Path, dst: str | Path, target: str) -> tuple[Path, int, int,
     validate_mapping()
     validate_package(source, profile)
     validate_theme_state(source, profile)
-    colour_map, font_map = build(target, profile["swap_fonts"])
+    colour_map, font_map, term_map = build(target, profile["swap_fonts"])
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -301,6 +471,7 @@ def swap(src: str | Path, dst: str | Path, target: str) -> tuple[Path, int, int,
     converted_parts = 0
     colour_changes = 0
     font_changes = 0
+    term_changes = 0
 
     try:
         with zipfile.ZipFile(source) as input_package, zipfile.ZipFile(
@@ -309,14 +480,15 @@ def swap(src: str | Path, dst: str | Path, target: str) -> tuple[Path, int, int,
             for item in input_package.infolist():
                 data = input_package.read(item.filename)
                 if is_convertible_part(item.filename, profile):
-                    text, colours, fonts = convert(
-                        data.decode("utf-8"), colour_map, font_map
+                    text, colours, fonts, terms = convert(
+                        data.decode("utf-8"), colour_map, font_map, term_map
                     )
                     data = text.encode("utf-8")
-                    if colours or fonts:
+                    if colours or fonts or terms:
                         converted_parts += 1
                         colour_changes += colours
                         font_changes += fonts
+                        term_changes += terms
                 output_package.writestr(item, data)
 
         validate_package(temporary, profile)
@@ -324,12 +496,12 @@ def swap(src: str | Path, dst: str | Path, target: str) -> tuple[Path, int, int,
     finally:
         temporary.unlink(missing_ok=True)
 
-    return destination, converted_parts, colour_changes, font_changes
+    return destination, converted_parts, colour_changes, font_changes, term_changes
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", help="Source .pptx or .xlsx file")
+    parser.add_argument("input", help="Source .pptx, .docx or .xlsx file")
     parser.add_argument("output", help="Destination file, same extension as input")
     parser.add_argument("--to", choices=("acme", "violet"), required=True)
     return parser.parse_args()
@@ -337,11 +509,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    output, parts, colours, fonts = swap(args.input, args.output, args.to)
+    output, parts, colours, fonts, terms = swap(args.input, args.output, args.to)
     print(f"{args.to.title()} theme conversion complete")
     print(f"XML parts changed: {parts}")
     print(f"Colour references changed: {colours}")
     print(f"Font references changed: {fonts}")
+    print(f"Text references changed: {terms}")
     print(f"Wrote: {output}")
 
 
